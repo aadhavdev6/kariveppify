@@ -1,0 +1,35 @@
+Here is a step-by-step summary of everything we have done to set up your KARIVEPPILA JUKEBOX and connect it to Spotify.
+
+Phase 1: Project Setup & Design
+Concept: We started with a goal to build a "Jukebox" controller that lets you queue songs on Spotify.
+Visuals: We created a "Morphing Particle" background using Three.js and GSAP to give it a cool, futuristic look.
+UI: We built a glass-morphism interface with a central input box for song requests and a hidden Admin Panel (password: "A") for controlling playback (Play, Pause, Skip, Volume).
+Phase 2: Spotify Integration (The Tricky Part)
+This is where we spent the most time ensuring the connection works securely.
+
+Registered App: You provided your Client ID (05ac...) from the Spotify Developer Dashboard.
+
+Authentication Attempt 1 (Implicit Grant):
+
+We first tried the "Implicit Grant" flow (simpler, but tokens expire in 1 hour and can't be refreshed automatically).
+Result: It worked initially but required frequent re-logins.
+Authentication Attempt 2 (Authorization Code with PKCE):
+
+To fix the "token expired" issue and the unsupported_response_type error, we upgraded to the modern PKCE Flow.
+This allows the app to stay connected indefinitely by automatically refreshing the token in the background.
+Phase 3: Fixing the Connection (Redirect URIs)
+The errors you saw (INVALID_CLIENT, Invalid redirect URI) happened because Spotify requires the "Redirect URI" in your code to match exactly what is in your Spotify Dashboard.
+
+The Mismatch: The app was sometimes trying to use a preview URL (like window.location.origin) which didn't match what Spotify expected.
+The Fix: We hardcoded the correct production URL in the code to ensure consistency.
+Current Required Setup
+For the app to work right now, your Spotify Dashboard MUST have this exact configuration:
+
+Log in to developer.spotify.com/dashboard
+Select your App.
+Click "Edit Settings".
+Under "Redirect URIs", add this exact link:
+https://Kariveppila-Jukebox.replit.dev/callback
+
+Save the settings.
+Once

@@ -1,0 +1,117 @@
+Oliver, [13-12-2025 10:03 PM]
+// --- Configuration ---
+const PARTICLE_COUNT = 15000; // Number of particles (adjust for performance)
+const SHAPE_RADIUS = 300;     // Radius of the circle shape
+const ANIMATION_DURATION = 4; // Seconds
+const COLOR = 0xAAAAAA;       // Particle color
+
+// --- Scene Setup ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 500;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Handle window resizing
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- Particle Creation ---
+const geometry = new THREE.BufferGeometry();
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+
+// 1. Initial (Random) Positions & Target (Circle) Positions
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+    // Initial: Randomly spread in a cube
+    positions[i * 3 + 0] = Math.random() * 800 - 400; // x
+    positions[i * 3 + 1] = Math.random() * 800 - 400; // y
+    positions[i * 3 + 2] = Math.random() * 800 - 400; // z
+
+    // Target: Circle shape on the XY plane
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.random() * SHAPE_RADIUS;
+    
+    targetPositions[i * 3 + 0] = Math.cos(angle) * radius; // x
+    targetPositions[i * 3 + 1] = Math.sin(angle) * radius; // y
+    targetPositions[i * 3 + 2] = 0; // z (flat circle)
+}
+
+// Add positions to the geometry
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('targetPosition', new THREE.BufferAttribute(targetPositions, 3));
+
+// Particle Material
+const material = new THREE.PointsMaterial({
+    color: COLOR,
+    size: 2, // Size of each particle
+    sizeAttenuation: true
+});
+
+const particles = new THREE.Points(geometry, material);
+scene.add(particles);
+
+// --- Animation Logic (GSAP) ---
+const positionAttribute = particles.geometry.attributes.position;
+const targetAttribute = particles.geometry.attributes.targetPosition;
+
+/**
+ * Morphs the particles from one state to another using GSAP.
+ * @param {boolean} toCircle - true to morph to circle, false to morph to random.
+ */
+function morphParticles(toCircle) {
+    // Determine the source and destination arrays for the animation
+    const sourceArray = toCircle ? positionAttribute.array : targetAttribute.array;
+    const destinationArray = toCircle ? targetAttribute.array : positionAttribute.array;
+
+    // Use a proxy object for GSAP to animate a single value (progress)
+    // and use the onUpdate callback to manually interpolate the particle positions.
+    const morphProxy = { progress: 0 };
+    
+    // Set the starting state based on the current morph state
+    gsap.set(morphProxy, { progress: toCircle ? 0 : 1 });
+
+    gsap.to(morphProxy, {
+        progress: toCircle ? 1 : 0, // Animate progress from 0 to 1 or 1 to 0
+        duration: ANIMATION_DURATION,
+        ease: "power2.inOut",
+        onUpdate: () => {
+            const p = morphProxy.progress;
+            
+            // Interpolate position for each particle (x, y, z)
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                // Linear interpolation: Lerp(A, B, t) = A + (B - A) * t
+                const start = sourceArray[i];
+                const end = destinationArray[i];
+                positionAttribute.array[i] = start + (end - start) * p;
+            }
+            positionAttribute.needsUpdate = true;
+        },
+        onComplete: () => {
+            // Once morphing is done, wait, then call the function again
+            setTimeout(() => {
+                // Toggle the direction for the next morph
+                morphParticles(!toCircle); 
+            }, 3000); // Wait 3 seconds
+        }
+    });
+}
+
+Oliver, [13-12-2025 10:03 PM]
+// Start the animation: Morph to the circle shape first
+morphParticles(true);
+
+// --- Render Loop ---
+function animate() {
+    requestAnimationFrame(animate);
+    // Optional: Rotate the particles to make it more dynamic
+    particles.rotation.z += 0.001; 
+    renderer.render(scene, camera);
+}
+
+animate();

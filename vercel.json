@@ -1,0 +1,72 @@
+{
+  "buildCommand": "npm run build:vercel",
+  "outputDirectory": "dist/public",
+  "framework": null,
+  "functions": {
+    "api/**/*.ts": {
+      "runtime": "@vercel/node@3.0.0"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/spotify/client-id",
+      "dest": "/api/spotify/client-id.ts"
+    },
+    {
+      "src": "/api/spotify/token",
+      "dest": "/api/spotify/token.ts"
+    },
+    {
+      "src": "/api/spotify/status",
+      "dest": "/api/spotify/status.ts"
+    },
+    {
+      "src": "/api/spotify/search",
+      "dest": "/api/spotify/search.ts"
+    },
+    {
+      "src": "/api/spotify/queue",
+      "dest": "/api/spotify/queue.ts"
+    },
+    {
+      "src": "/api/spotify/play",
+      "dest": "/api/spotify/play.ts"
+    },
+    {
+      "src": "/api/spotify/pause",
+      "dest": "/api/spotify/pause.ts"
+    },
+    {
+      "src": "/api/spotify/next",
+      "dest": "/api/spotify/next.ts"
+    },
+    {
+      "src": "/api/spotify/volume",
+      "dest": "/api/spotify/volume.ts"
+    },
+    {
+      "src": "/api/spotify/devices",
+      "dest": "/api/spotify/devices.ts"
+    },
+    {
+      "src": "/api/spotify/clear-queue",
+      "dest": "/api/spotify/clear-queue.ts"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "/assets/$1"
+    },
+    {
+      "src": "/favicon.png",
+      "dest": "/favicon.png"
+    },
+    {
+      "src": "/opengraph.jpg",
+      "dest": "/opengraph.jpg"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}

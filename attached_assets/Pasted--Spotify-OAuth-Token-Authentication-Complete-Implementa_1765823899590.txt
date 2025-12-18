@@ -1,0 +1,1320 @@
+# Spotify OAuth & Token Authentication - Complete Implementation Guide
+
+## Table of Contents
+1. [Architecture Overview](#architecture-overview)
+2. [OAuth 2.0 Flow Explained](#oauth-20-flow-explained)
+3. [Backend Implementation](#backend-implementation)
+4. [Frontend Implementation](#frontend-implementation)
+5. [Token Management & Refresh Logic](#token-management--refresh-logic)
+6. [Security Considerations](#security-considerations)
+7. [API Endpoints Reference](#api-endpoints-reference)
+8. [Step-by-Step Implementation](#step-by-step-implementation)
+9. [Environment Variables](#environment-variables)
+10. [Common Issues & Solutions](#common-issues--solutions)
+
+---
+
+## Architecture Overview
+
+### System Design
+This implementation uses a **server-side token storage** approach where:
+- **Client (Frontend)**: Initiates OAuth flow, handles redirects
+- **Server (Backend)**: Stores tokens, refreshes them automatically, makes API calls
+- **Spotify API**: Authorization and resource server
+
+### Key Benefits
+- ✅ Tokens never exposed to client
+- ✅ Automatic token refresh
+- ✅ Single authentication for all users
+- ✅ Admin controls with password protection
+- ✅ No database required (in-memory storage)
+
+---
+
+## OAuth 2.0 Flow Explained
+
+### Step-by-Step OAuth Process
+
+```
+┌─────────┐         ┌─────────┐         ┌─────────────┐
+│ Client  │         │ Server  │         │   Spotify   │
+└────┬────┘         └────┬────┘         └──────┬──────┘
+     │                   │                      │
+     │  1. Click Login   │                      │
+     ├──────────────────>│                      │
+     │                   │                      │
+     │  2. Redirect to   │                      │
+     │    Spotify Auth   │                      │
+     ├──────────────────────────────────────────>
+     │                   │                      │
+     │  3. User Approves │                      │
+     │<──────────────────────────────────────────
+     │                   │                      │
+     │  4. Redirect back │                      │
+     │    with code      │                      │
+     │<──────────────────│                      │
+     │                   │                      │
+     │  5. Send code to  │                      │
+     │     backend       │                      │
+     ├──────────────────>│                      │
+     │                   │  6. Exchange code    │
+     │                   │     for tokens       │
+     │                   ├─────────────────────>│
+     │                   │                      │
+     │                   │  7. Access & Refresh │
+     │                   │     tokens           │
+     │                   │<─────────────────────│
+     │                   │                      │
+     │                   │  8. Store tokens     │
+     │                   │     in memory        │
+     │                   │                      │
+     │  9. Success       │                      │
+     │<──────────────────│                      │
+     │                   │                      │
+```
+
+### OAuth Flow Details
+
+**Step 1: Authorization Request**
+```javascript
+// Frontend constructs authorization URL
+const authUrl = `https://accounts.spotify.com/authorize?
+  client_id=${CLIENT_ID}&
+  redirect_uri=${encodeURIComponent(REDIRECT_URI)}&
+  scope=${encodeURIComponent(SCOPES.join(" "))}&
+  response_type=code&
+  show_dialog=true`;
+
+window.location.href = authUrl;
+```
+
+**Step 2: User Authorization**
+- User is redirected to Spotify
+- User logs in and approves requested permissions
+- Spotify redirects back with authorization code
+
+**Step 3: Code Exchange**
+```javascript
+// Backend exchanges code for tokens
+const authString = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+
+const response = await fetch("https://accounts.spotify.com/api/token", {
+  method: "POST",
+  headers: {
+    Authorization: `Basic ${authString}`,
+    "Content-Type": "application/x-www-form-urlencoded",
+  },
+  body: new URLSearchParams({
+    grant_type: "authorization_code",
+    code: authorizationCode,
+    redirect_uri: REDIRECT_URI,
+  }),
+});
+
+const tokens = await response.json();
+// Returns: { access_token, refresh_token, expires_in }
+```
+
+---
+
+## Backend Implementation
+
+### 1. Token Storage Class
+
+```typescript
+// server/storage.ts
+
+interface SpotifyTokens {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number; // timestamp when token expires
+}
+
+class SpotifyTokenStorage {
+  private tokens: SpotifyTokens | null = null;
+
+  // Store tokens with expiration time
+  setTokens(accessToken: string, refreshToken: string, expiresIn: number) {
+    this.tokens = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: Date.now() + expiresIn * 1000, // Convert seconds to milliseconds
+    };
+  }
+
+  // Get all tokens
+  getTokens(): SpotifyTokens | null {
+    return this.tokens;
+  }
+
+  // Get only access token
+  getAccessToken(): string | null {
+    return this.tokens?.access_token || null;
+  }
+
+  // Get only refresh token
+  getRefreshToken(): string | null {
+    return this.tokens?.refresh_token || null;
+  }
+
+  // Check if token is expired or about to expire
+  isTokenExpired(): boolean {
+    if (!this.tokens) return true;
+    // Consider token expired if it expires in less than 5 minutes
+    // This prevents API calls from failing mid-request
+    return Date.now() >= (this.tokens.expires_at - 5 * 60 * 1000);
+  }
+
+  // Clear all tokens
+  clearTokens() {
+    this.tokens = null;
+  }
+}
+
+// Export singleton instance
+export const spotifyTokens = new SpotifyTokenStorage();
+```
+
+### 2. Token Exchange Functions
+
+```typescript
+// server/routes.ts
+
+const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID || "";
+const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET || "";
+
+// Exchange authorization code for access and refresh tokens
+async function exchangeCodeForTokens(code: string, redirectUri: string) {
+  // Create Basic Auth header (required by Spotify)
+  const authString = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+  
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authString}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error_description || error.error || "Token exchange failed");
+  }
+
+  return await response.json();
+  // Returns: { access_token, refresh_token, token_type, expires_in, scope }
+}
+
+// Refresh expired access token using refresh token
+async function refreshAccessToken(refreshToken: string) {
+  const authString = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+  
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authString}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error_description || error.error || "Token refresh failed");
+  }
+
+  return await response.json();
+  // Returns: { access_token, token_type, expires_in, scope }
+  // Note: May or may not include a new refresh_token
+}
+```
+
+### 3. Automatic Token Refresh Logic
+
+```typescript
+// server/routes.ts
+
+// Get valid access token (automatically refreshes if expired)
+async function getValidServerToken(): Promise<string | null> {
+  // No tokens stored yet
+  if (!spotifyTokens.getAccessToken()) {
+    return null;
+  }
+
+  // Check if token needs refresh (expires in < 5 minutes)
+  if (spotifyTokens.isTokenExpired()) {
+    const refreshToken = spotifyTokens.getRefreshToken();
+    if (!refreshToken) {
+      return null;
+    }
+
+    try {
+      console.log("Refreshing server Spotify token...");
+      const tokens = await refreshAccessToken(refreshToken);
+      
+      // Store new tokens (keep old refresh token if new one not provided)
+      spotifyTokens.setTokens(
+        tokens.access_token,
+        tokens.refresh_token || refreshToken,
+        tokens.expires_in || 3600
+      );
+      
+      return tokens.access_token;
+    } catch (error: any) {
+      console.error(`Token refresh failed: ${error.message}`);
+      // Clear invalid tokens
+      spotifyTokens.clearTokens();
+      return null;
+    }
+  }
+
+  // Token is still valid
+  return spotifyTokens.getAccessToken();
+}
+```
+
+### 4. API Endpoints
+
+```typescript
+// server/routes.ts
+
+export async function registerRoutes(httpServer: Server | null, app: Express) {
+  
+  // 1. TOKEN EXCHANGE ENDPOINT
+  app.post("/api/spotify/token", async (req, res) => {
+    try {
+      const { code, redirectUri } = req.body;
+
+      // Validate request
+      if (!code || !redirectUri) {
+        return res.status(400).json({ error: "Missing code or redirectUri" });
+      }
+
+      if (!CLIENT_ID || !CLIENT_SECRET) {
+        return res.status(500).json({ error: "Server configuration error" });
+      }
+
+      // Exchange code for tokens
+      const tokens = await exchangeCodeForTokens(code, redirectUri.trim());
+
+      // Store tokens server-side
+      spotifyTokens.setTokens(
+        tokens.access_token,
+        tokens.refresh_token,
+        tokens.expires_in || 3600
+      );
+
+      res.json({
+        success: true,
+        message: "Server authenticated with Spotify successfully",
+        expires_in: tokens.expires_in,
+      });
+    } catch (error: any) {
+      console.error("Token exchange error:", error.message);
+      res.status(500).json({ error: error.message || "Token exchange failed" });
+    }
+  });
+
+  // 2. AUTHENTICATION STATUS ENDPOINT
+  app.get("/api/spotify/status", async (req, res) => {
+    try {
+      const token = await getValidServerToken();
+      const hasToken = !!spotifyTokens.getAccessToken();
+      const authenticated = !!token;
+      
+      res.json({
+        authenticated,  // Has valid token
+        hasToken       // Has any token (may be expired)
+      });
+    } catch (error: any) {
+      res.status(500).json({ 
+        error: "Failed to check authentication status",
+        authenticated: false,
+        hasToken: false
+      });
+    }
+  });
+
+  // 3. PROTECTED API ENDPOINT EXAMPLE (Add to Queue)
+  app.post("/api/spotify/queue", async (req, res) => {
+    try {
+      const { songName, uri } = req.body;
+
+      // Get valid token (auto-refreshes if needed)
+      const accessToken = await getValidServerToken();
+      if (!accessToken) {
+        return res.status(401).json({ 
+          error: "Server not authenticated with Spotify" 
+        });
+      }
+
+      let trackUri = uri;
+
+      // Search for song if only name provided
+      if (songName && !uri) {
+        const searchRes = await fetch(
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(songName)}&type=track&limit=1`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          }
+        );
+
+        if (!searchRes.ok) {
+          throw new Error("Search failed");
+        }
+
+        const searchData = await searchRes.json();
+        if (!searchData.tracks?.items?.length) {
+          return res.status(404).json({ error: `Song not found: ${songName}` });
+        }
+
+        trackUri = searchData.tracks.items[0].uri;
+      }
+
+      // Add to queue using Spotify API
+      const queueRes = await fetch(
+        `https://api.spotify.com/v1/me/player/queue?uri=${encodeURIComponent(trackUri)}`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      );
+
+      if (!queueRes.ok && queueRes.status !== 204) {
+        const error = await queueRes.json().catch(() => ({}));
+        throw new Error(error.error?.message || "Failed to add song to queue");
+      }
+
+      res.json({ success: true, message: "Song added to queue" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to add song" });
+    }
+  });
+
+  // 4. ADMIN-PROTECTED ENDPOINT (with password)
+  app.post("/api/spotify/control", async (req, res) => {
+    try {
+      const { action, volume } = req.body;
+      const { password } = req.headers;
+
+      // Verify admin password
+      const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+      if (!ADMIN_PASSWORD) {
+        return res.status(500).json({ error: "Admin password not configured" });
+      }
+      if (password !== ADMIN_PASSWORD) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      // Get valid token
+      const accessToken = await getValidServerToken();
+      if (!accessToken) {
+        return res.status(401).json({ error: "Server not authenticated" });
+      }
+
+      // Execute control action
+      let response;
+      switch (action) {
+        case "play":
+          response = await fetch("https://api.spotify.com/v1/me/player/play", {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          break;
+        case "pause":
+          response = await fetch("https://api.spotify.com/v1/me/player/pause", {
+            method: "PUT",
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          break;
+        default:
+          return res.status(400).json({ error: "Invalid action" });
+      }
+
+      if (!response.ok && response.status !== 204) {
+        throw new Error("Control action failed");
+      }
+
+      res.json({ success: true, message: `Action ${action} completed` });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+}
+```
+
+---
+
+## Frontend Implementation
+
+### 1. Configuration & Constants
+
+```typescript
+// client/src/pages/YourPage.tsx
+
+const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || "";
+const REDIRECT_URI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI || "";
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || "";
+
+// Required Spotify API scopes
+const SCOPES = [
+  "user-modify-playback-state",      // Control playback (play, pause, skip)
+  "user-read-playback-state",        // Read playback state
+  "user-read-currently-playing"      // Read currently playing track
+];
+```
+
+### 2. Authentication State Management
+
+```typescript
+// State variables
+const [isAuthenticated, setIsAuthenticated] = useState(false);
+const [spotifyToken, setSpotifyToken] = useState<string | null>(null);
+const [isRedirecting, setIsRedirecting] = useState(false);
+```
+
+### 3. Authentication Check & OAuth Callback Handler
+
+```typescript
+useEffect(() => {
+  const checkServerAuth = async () => {
+    try {
+      // Check if server is already authenticated
+      const res = await fetch("/api/spotify/status");
+      const data = await res.json();
+      
+      if (data.authenticated) {
+        // Server has valid token
+        setSpotifyToken("server-authenticated");
+        setIsAuthenticated(true);
+        return;
+      }
+
+      // Check for OAuth callback (authorization code in URL)
+      const urlParams = new URLSearchParams(window.location.search);
+      const code = urlParams.get("code");
+      const error = urlParams.get("error");
+
+      if (error) {
+        // User denied authorization
+        toast({
+          title: "Authentication Error",
+          description: "Failed to authenticate with Spotify.",
+          variant: "destructive",
+        });
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return;
+      }
+
+      if (code && CLIENT_ID) {
+        // We have an authorization code - exchange it for tokens
+        setIsRedirecting(true);
+        
+        try {
+          const actualRedirectUri = REDIRECT_URI.trim();
+          
+          if (!actualRedirectUri) {
+            throw new Error("Redirect URI not configured");
+          }
+          
+          // Send code to backend for token exchange
+          const res = await fetch("/api/spotify/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              code, 
+              redirectUri: actualRedirectUri 
+            }),
+          });
+
+          if (!res.ok) {
+            const errorData = await res.json();
+            throw new Error(errorData.error || "Token exchange failed");
+          }
+
+          const responseData = await res.json();
+          
+          // Success! Server is now authenticated
+          toast({
+            title: "Authentication Successful",
+            description: "Server authenticated with Spotify!",
+          });
+
+          setSpotifyToken("server-authenticated");
+          setIsAuthenticated(true);
+          
+          // Clean up URL (remove code parameter)
+          window.history.replaceState({}, document.title, window.location.pathname);
+          
+        } catch (error: any) {
+          toast({
+            title: "Authentication Failed",
+            description: error.message,
+            variant: "destructive",
+          });
+          window.history.replaceState({}, document.title, window.location.pathname);
+        } finally {
+          setIsRedirecting(false);
+        }
+      }
+    } catch (e) {
+      console.error("Error checking server auth:", e);
+    }
+  };
+
+  checkServerAuth();
+}, []);
+```
+
+### 4. Login Function
+
+```typescript
+const handleServerLogin = () => {
+  const redirectUri = REDIRECT_URI.trim();
+  
+  // Validate configuration
+  if (!CLIENT_ID) {
+    toast({
+      title: "Configuration Error",
+      description: "Spotify Client ID is not configured.",
+      variant: "destructive",
+    });
+    return;
+  }
+  
+  if (!redirectUri) {
+    toast({
+      title: "Configuration Error",
+      description: "Redirect URI is not configured.",
+      variant: "destructive",
+    });
+    return;
+  }
+  
+  setIsRedirecting(true);
+  
+  // Construct Spotify authorization URL
+  const authUrl = `https://accounts.spotify.com/authorize?` +
+    `client_id=${CLIENT_ID}&` +
+    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+    `scope=${encodeURIComponent(SCOPES.join(" "))}&` +
+    `response_type=code&` +
+    `show_dialog=true`;  // Force login dialog even if previously authorized
+  
+  // Redirect to Spotify
+  window.location.href = authUrl;
+};
+```
+
+### 5. Making Authenticated API Calls
+
+```typescript
+// Example: Add song to queue
+const addToQueue = async (songName: string) => {
+  try {
+    const res = await fetch("/api/spotify/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ songName }),
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || "Failed to add song");
+    }
+
+    const data = await res.json();
+    toast({
+      title: "Success",
+      description: data.message,
+    });
+  } catch (error: any) {
+    toast({
+      title: "Error",
+      description: error.message,
+      variant: "destructive",
+    });
+  }
+};
+
+// Example: Admin control with password
+const controlPlayback = async (action: string) => {
+  try {
+    const res = await fetch("/api/spotify/control", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "password": ADMIN_PASSWORD,  // Admin password in header
+      },
+      body: JSON.stringify({ action }),
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || "Control failed");
+    }
+
+    toast({
+      title: "Success",
+      description: `Playback ${action}ed`,
+    });
+  } catch (error: any) {
+    toast({
+      title: "Error",
+      description: error.message,
+      variant: "destructive",
+    });
+  }
+};
+```
+
+---
+
+## Token Management & Refresh Logic
+
+### Automatic Token Refresh Flow
+
+```
+┌─────────────────────────────────────────────────────┐
+│  API Request Arrives                                │
+│  (e.g., GET /api/spotify/now-playing)               │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────┐
+│  Call getValidServerToken()                         │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 ▼
+         ┌───────────────┐
+         │ Has Token?    │
+         └───┬───────┬───┘
+             │       │
+          NO │       │ YES
+             │       │
+             ▼       ▼
+      ┌──────────┐  ┌────────────────┐
+      │ Return   │  │ Token Expired? │
+      │ null     │  │ (< 5 min left) │
+      └──────────┘  └───┬────────┬───┘
+                        │        │
+                     NO │        │ YES
+                        │        │
+                        ▼        ▼
+                  ┌──────────┐  ┌─────────────────┐
+                  │ Return   │  │ Has Refresh     │
+                  │ Token    │  │ Token?          │
+                  └──────────┘  └───┬─────────┬───┘
+                                    │         │
+                                 NO │         │ YES
+                                    │         │
+                                    ▼         ▼
+                              ┌──────────┐  ┌──────────────────┐
+                              │ Clear    │  │ Call Spotify     │
+                              │ Tokens   │  │ Token Endpoint   │
+                              │ Return   │  │ with Refresh     │
+                              │ null     │  │ Token            │
+                              └──────────┘  └────────┬─────────┘
+                                                     │
+                                            ┌────────┴────────┐
+                                            │                 │
+                                        SUCCESS           FAILURE
+                                            │                 │
+                                            ▼                 ▼
+                                    ┌──────────────┐  ┌──────────────┐
+                                    │ Store New    │  │ Clear Tokens │
+                                    │ Tokens       │  │ Return null  │
+                                    │ Return Token │  └──────────────┘
+                                    └──────────────┘
+```
+
+### Token Expiration Strategy
+
+```typescript
+// Why check 5 minutes before expiration?
+
+// BAD: Check exact expiration
+isTokenExpired(): boolean {
+  return Date.now() >= this.tokens.expires_at;
+}
+// Problem: Token might expire during API call
+
+// GOOD: Check with 5-minute buffer
+isTokenExpired(): boolean {
+  if (!this.tokens) return true;
+  // Refresh if token expires in less than 5 minutes
+  return Date.now() >= (this.tokens.expires_at - 5 * 60 * 1000);
+}
+// Benefit: Prevents mid-request expiration
+```
+
+---
+
+## Security Considerations
+
+### 1. Never Expose Tokens to Client
+
+❌ **BAD - Sending tokens to client:**
+```javascript
+// DON'T DO THIS
+app.post("/api/spotify/token", async (req, res) => {
+  const tokens = await exchangeCodeForTokens(code, redirectUri);
+  
+  // BAD: Sending tokens to client
+  res.json({
+    access_token: tokens.access_token,  // ❌ Security risk
+    refresh_token: tokens.refresh_token // ❌ Never expose this
+  });
+});
+```
+
+✅ **GOOD - Server-side only:**
+```javascript
+// DO THIS
+app.post("/api/spotify/token", async (req, res) => {
+  const tokens = await exchangeCodeForTokens(code, redirectUri);
+  
+  // Store server-side
+  spotifyTokens.setTokens(
+    tokens.access_token,
+    tokens.refresh_token,
+    tokens.expires_in
+  );
+  
+  // Return success only
+  res.json({
+    success: true,
+    message: "Authenticated successfully"
+    // No tokens exposed ✅
+  });
+});
+```
+
+### 2. Environment Variables Security
+
+```bash
+# NEVER commit these to git
+# Add to .gitignore: .env, .env.local
+
+# Server-side only (NEVER expose to client)
+SPOTIFY_CLIENT_SECRET=your_secret_here
+ADMIN_PASSWORD=your_admin_password
+
+# Can be public (in client)
+VITE_SPOTIFY_CLIENT_ID=your_client_id
+VITE_SPOTIFY_REDIRECT_URI=http://localhost:5000/
+```
+
+### 3. Admin Password Protection
+
+```typescript
+// Protect sensitive endpoints with password
+app.post("/api/spotify/control", async (req, res) => {
+  const { password } = req.headers;
+  
+  // Verify admin password
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  // ... proceed with action
+});
+```
+
+### 4. HTTPS in Production
+
+```typescript
+// Ensure redirect URI uses HTTPS in production
+const REDIRECT_URI = process.env.NODE_ENV === 'production'
+  ? 'https://yourdomain.com/callback'
+  : 'http://localhost:5000/';
+```
+
+---
+
+## API Endpoints Reference
+
+### POST /api/spotify/token
+**Purpose:** Exchange authorization code for tokens  
+**Auth:** None  
+**Request:**
+```json
+{
+  "code": "AQD1f9...",
+  "redirectUri": "http://localhost:5000/"
+}
+```
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Server authenticated with Spotify successfully",
+  "expires_in": 3600
+}
+```
+
+### GET /api/spotify/status
+**Purpose:** Check authentication status  
+**Auth:** None  
+**Response:**
+```json
+{
+  "authenticated": true,
+  "hasToken": true
+}
+```
+
+### POST /api/spotify/queue
+**Purpose:** Add song to Spotify queue  
+**Auth:** Server must be authenticated  
+**Request:**
+```json
+{
+  "songName": "Bohemian Rhapsody"
+}
+```
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Song added to queue"
+}
+```
+
+### POST /api/spotify/control
+**Purpose:** Control playback (admin only)  
+**Auth:** Admin password in header  
+**Headers:**
+```json
+{
+  "password": "your_admin_password"
+}
+```
+**Request:**
+```json
+{
+  "action": "play"
+}
+```
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Action play completed"
+}
+```
+
+### GET /api/spotify/now-playing
+**Purpose:** Get currently playing track  
+**Auth:** Server must be authenticated  
+**Response:**
+```json
+{
+  "playing": true,
+  "track": {
+    "name": "Bohemian Rhapsody",
+    "artist": "Queen",
+    "image": "https://..."
+  }
+}
+```
+
+---
+
+## Step-by-Step Implementation
+
+### Phase 1: Spotify Developer Setup
+
+1. **Create Spotify App:**
+   - Go to https://developer.spotify.com/dashboard
+   - Click "Create App"
+   - Fill in app name and description
+   - Add Redirect URI: `http://localhost:5000/` (or your production URL)
+   - Check "Web API" in API selection
+   - Save app
+
+2. **Get Credentials:**
+   - Copy Client ID
+   - Click "Show Client Secret"
+   - Copy Client Secret
+   - **IMPORTANT:** Never share Client Secret publicly
+
+### Phase 2: Backend Setup
+
+1. **Install Dependencies:**
+```bash
+npm install express dotenv
+npm install --save-dev @types/express @types/node
+```
+
+2. **Create Environment File (.env):**
+```bash
+# Server credentials (NEVER commit to git)
+SPOTIFY_CLIENT_ID=your_client_id_here
+SPOTIFY_CLIENT_SECRET=your_client_secret_here
+ADMIN_PASSWORD=your_secure_password_here
+
+# Server config
+PORT=5000
+NODE_ENV=development
+```
+
+3. **Create Token Storage (server/storage.ts):**
+```typescript
+interface SpotifyTokens {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+}
+
+class SpotifyTokenStorage {
+  private tokens: SpotifyTokens | null = null;
+
+  setTokens(accessToken: string, refreshToken: string, expiresIn: number) {
+    this.tokens = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: Date.now() + expiresIn * 1000,
+    };
+  }
+
+  getAccessToken(): string | null {
+    return this.tokens?.access_token || null;
+  }
+
+  getRefreshToken(): string | null {
+    return this.tokens?.refresh_token || null;
+  }
+
+  isTokenExpired(): boolean {
+    if (!this.tokens) return true;
+    return Date.now() >= (this.tokens.expires_at - 5 * 60 * 1000);
+  }
+
+  clearTokens() {
+    this.tokens = null;
+  }
+}
+
+export const spotifyTokens = new SpotifyTokenStorage();
+```
+
+4. **Create Routes (server/routes.ts):**
+   - Copy the backend implementation from the "Backend Implementation" section above
+   - Include all helper functions: `exchangeCodeForTokens`, `refreshAccessToken`, `getValidServerToken`
+   - Add all API endpoints
+
+5. **Setup Express Server (server/index.ts):**
+```typescript
+import "dotenv/config";
+import express from "express";
+import { registerRoutes } from "./routes.js";
+
+const app = express();
+app.use(express.json());
+
+// Register routes
+await registerRoutes(null, app);
+
+// Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+```
+
+### Phase 3: Frontend Setup
+
+1. **Create Environment File (.env.local):**
+```bash
+# Client-side variables (safe to expose)
+VITE_SPOTIFY_CLIENT_ID=your_client_id_here
+VITE_SPOTIFY_REDIRECT_URI=http://localhost:5000/
+VITE_ADMIN_PASSWORD=your_admin_password_here
+```
+
+2. **Create Authentication Component:**
+```typescript
+import { useEffect, useState } from "react";
+import { useToast } from "@/hooks/use-toast";
+
+const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || "";
+const REDIRECT_URI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI || "";
+
+const SCOPES = [
+  "user-modify-playback-state",
+  "user-read-playback-state",
+  "user-read-currently-playing"
+];
+
+export function SpotifyAuth() {
+  const { toast } = useToast();
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
+
+  useEffect(() => {
+    // Copy the checkServerAuth function from Frontend Implementation section
+  }, []);
+
+  const handleLogin = () => {
+    // Copy the handleServerLogin function from Frontend Implementation section
+  };
+
+  if (isAuthenticated) {
+    return <div>Connected to Spotify ✅</div>;
+  }
+
+  return (
+    <button onClick={handleLogin} disabled={isRedirecting}>
+      {isRedirecting ? "Redirecting..." : "Connect Spotify"}
+    </button>
+  );
+}
+```
+
+### Phase 4: Testing
+
+1. **Start Server:**
+```bash
+npm run dev
+```
+
+2. **Test Authentication Flow:**
+   - Click "Connect Spotify" button
+   - Login to Spotify (if not already)
+   - Approve permissions
+   - Should redirect back and show "Connected ✅"
+
+3. **Test API Endpoints:**
+```bash
+# Check status
+curl http://localhost:5000/api/spotify/status
+
+# Add song to queue
+curl -X POST http://localhost:5000/api/spotify/queue \
+  -H "Content-Type: application/json" \
+  -d '{"songName": "Bohemian Rhapsody"}'
+
+# Control playback (admin)
+curl -X POST http://localhost:5000/api/spotify/control \
+  -H "Content-Type: application/json" \
+  -H "password: your_admin_password" \
+  -d '{"action": "play"}'
+```
+
+### Phase 5: Production Deployment
+
+1. **Update Environment Variables:**
+```bash
+# Production .env
+SPOTIFY_CLIENT_ID=your_client_id
+SPOTIFY_CLIENT_SECRET=your_client_secret
+ADMIN_PASSWORD=your_secure_password
+PORT=5000
+NODE_ENV=production
+```
+
+2. **Update Redirect URI in Spotify Console:**
+   - Add production URL: `https://yourdomain.com/`
+
+3. **Enable HTTPS:**
+   - Use reverse proxy (nginx, Caddy)
+   - Or platform-provided SSL (Vercel, Netlify, etc.)
+
+---
+
+## Environment Variables
+
+### Server-Side (.env)
+```bash
+# Spotify OAuth credentials
+SPOTIFY_CLIENT_ID=abc123...          # From Spotify Developer Dashboard
+SPOTIFY_CLIENT_SECRET=def456...      # Keep this SECRET!
+
+# Admin access
+ADMIN_PASSWORD=secure_password_here  # For admin controls
+
+# Server configuration
+PORT=5000
+NODE_ENV=development  # or 'production'
+```
+
+### Client-Side (.env.local)
+```bash
+# Spotify configuration
+VITE_SPOTIFY_CLIENT_ID=abc123...     # Same as server
+VITE_SPOTIFY_REDIRECT_URI=http://localhost:5000/  # Must match Spotify Console
+
+# Admin password (for frontend admin controls)
+VITE_ADMIN_PASSWORD=secure_password_here
+```
+
+---
+
+## Common Issues & Solutions
+
+### Issue 1: "redirect_uri_mismatch" Error
+
+**Problem:**
+```json
+{
+  "error": "redirect_uri_mismatch",
+  "error_description": "Invalid redirect URI"
+}
+```
+
+**Solution:**
+1. Go to Spotify Developer Dashboard
+2. Open your app settings
+3. Add EXACT redirect URI (including trailing slash)
+4. Examples:
+   - Development: `http://localhost:5000/`
+   - Production: `https://yourdomain.com/`
+
+### Issue 2: Token Expired Mid-Request
+
+**Problem:** API calls fail with 401 after some time
+
+**Solution:** Use automatic refresh (already implemented)
+```typescript
+// Always use getValidServerToken() for API calls
+const token = await getValidServerToken();
+// This automatically refreshes if needed
+```
+
+### Issue 3: "Player command failed: No active device found"
+
+**Problem:** Cannot control playback
+
+**Solution:**
+1. Open Spotify app on any device
+2. Start playing any song
+3. Device is now active
+4. Try API call again
+
+### Issue 4: CORS Errors in Browser
+
+**Problem:**
+```
+Access to fetch has been blocked by CORS policy
+```
+
+**Solution:** Add CORS middleware
+```typescript
+import cors from 'cors';
+
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? 'https://yourdomain.com' 
+    : 'http://localhost:5000',
+  credentials: true
+}));
+```
+
+### Issue 5: Tokens Lost on Server Restart
+
+**Problem:** In-memory storage loses tokens when server restarts
+
+**Solution for Production:** Use persistent storage
+```typescript
+// Option 1: File-based storage
+import fs from 'fs/promises';
+
+class PersistentTokenStorage {
+  private tokenFile = './spotify-tokens.json';
+  
+  async setTokens(accessToken: string, refreshToken: string, expiresIn: number) {
+    const tokens = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: Date.now() + expiresIn * 1000,
+    };
+    await fs.writeFile(this.tokenFile, JSON.stringify(tokens));
+  }
+  
+  async getTokens() {
+    try {
+      const data = await fs.readFile(this.tokenFile, 'utf-8');
+      return JSON.parse(data);
+    } catch {
+      return null;
+    }
+  }
+}
+
+// Option 2: Database storage (PostgreSQL, MongoDB, etc.)
+```
+
+---
+
+## Quick Reference
+
+### Authorization URL Format
+```
+https://accounts.spotify.com/authorize?
+  client_id={CLIENT_ID}&
+  redirect_uri={REDIRECT_URI}&
+  scope={SCOPES}&
+  response_type=code&
+  show_dialog=true
+```
+
+### Token Exchange Request
+```
+POST https://accounts.spotify.com/api/token
+Authorization: Basic {base64(CLIENT_ID:CLIENT_SECRET)}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code={AUTHORIZATION_CODE}
+&redirect_uri={REDIRECT_URI}
+```
+
+### Refresh Token Request
+```
+POST https://accounts.spotify.com/api/token
+Authorization: Basic {base64(CLIENT_ID:CLIENT_SECRET)}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token
+&refresh_token={REFRESH_TOKEN}
+```
+
+### Using Access Token
+```
+GET https://api.spotify.com/v1/me/player/currently-playing
+Authorization: Bearer {ACCESS_TOKEN}
+```
+
+---
+
+## Additional Resources
+
+- **Spotify Web API Documentation:** https://developer.spotify.com/documentation/web-api
+- **OAuth 2.0 Authorization Code Flow:** https://developer.spotify.com/documentation/web-api/tutorials/code-flow
+- **Available Scopes:** https://developer.spotify.com/documentation/web-api/concepts/scopes
+- **API Reference:** https://developer.spotify.com/documentation/web-api/reference
+
+---
+
+## Summary
+
+This implementation provides:
+- ✅ Secure server-side token storage
+- ✅ Automatic token refresh
+- ✅ OAuth 2.0 authorization code flow
+- ✅ Admin password protection
+- ✅ No database required
+- ✅ Production-ready architecture
+- ✅ Comprehensive error handling
+
+Use this guide as a template for implementing OAuth authentication with any API that supports the OAuth 2.0 authorization code flow (Google, GitHub, Twitter, etc.) by adapting the authorization URLs and scopes.
